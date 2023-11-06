@@ -1,11 +1,17 @@
-use std::ops::{Index, Range, RangeFrom, RangeTo};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct Nibbles {
     data: Vec<u8>,
 }
 
 impl Nibbles {
+    pub fn from_raw_bytes(bytes: &[u8]) -> Self {
+        Self {
+            data: bytes.to_vec(),
+        }
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut data = Vec::with_capacity(bytes.len() * 2);
         for byte in bytes {
@@ -22,10 +28,15 @@ impl Nibbles {
         let mut result = Vec::new();
         let mut other_iter = other.data.iter();
         for nibble in &self.data {
-            if let Some(other_nibble) = other_iter.next() {
-                result.push(nibble & other_nibble);
-            } else {
-                break;
+            match other_iter.next() {
+                None => break,
+                Some(other_nibble) => {
+                    if nibble == other_nibble {
+                        result.push(*nibble);
+                    } else {
+                        break;
+                    }
+                }
             }
         }
 
@@ -39,7 +50,7 @@ impl Nibbles {
     }
 
     pub fn prefixed_bytes(&self, leaf: bool) -> Vec<u8> {
-        let mut prefixed: Vec<u8> = Vec::new();
+        let mut prefixed: Vec<u8> = Vec::with_capacity(2 + self.data.len());
 
         let prefix = match self.data.len() % 2 {
             0 => vec![0x00, 0x00],
@@ -74,6 +85,52 @@ impl Nibbles {
     pub fn at(&self, index: usize) -> usize {
         self.data[index] as usize
     }
+
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl Serialize for Nibbles {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where S: serde::Serializer {
+        let mut bytes = Vec::with_capacity(self.data.len() / 2 + 1);
+        if self.data.len() % 2 == 0 {
+            bytes.push(0x00);
+        } else {
+            bytes.push(0x01);
+        }
+        for i in (0..self.data.len()).step_by(2) {
+            let mut byte = self.data[i] << 4;
+            if i + 1 < self.data.len() {
+                byte += self.data[i + 1];
+            }
+            bytes.push(byte);
+        }
+        serializer.serialize_bytes(&bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for Nibbles {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where D: serde::Deserializer<'de> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        let mut data = Vec::with_capacity(bytes.len() * 2);
+        for byte in bytes[1..].iter() {
+            data.push(byte >> 4);
+            data.push(byte & 0x0F);
+        }
+
+        let data = if bytes[0] == 0x00 {
+            data
+        } else {
+            data[..data.len() - 1].to_vec()
+        };
+
+        Ok(Self {
+            data,
+        })
+    }
 }
 
 macro_rules! nibbles {
@@ -106,23 +163,20 @@ mod tests {
     #[test]
     fn test_intersection() {
         let nibbles1 = Nibbles::from_bytes(&[0x12, 0x34, 0x56, 0x78]);
-        let nibbles2 = Nibbles::from_bytes(&[0x12, 0x34, 0x56, 0x78]);
+        let nibbles2 = Nibbles::from_bytes(&[0x12, 0x34, 0x66, 0x78]);
         let result = nibbles1.intersection(&nibbles2);
         assert_eq!(result.at(0), 0x01);
         assert_eq!(result.at(1), 0x02);
         assert_eq!(result.at(2), 0x03);
         assert_eq!(result.at(3), 0x04);
-        assert_eq!(result.at(4), 0x05);
-        assert_eq!(result.at(5), 0x06);
-        assert_eq!(result.at(6), 0x07);
-        assert_eq!(result.at(7), 0x08);
+        assert_eq!(result.len(), 4);
     }
 
     #[test]
     fn test_slicing() {
         let nibbles = Nibbles::from_bytes(&[0x12, 0x34, 0x56, 0x78]);
-        assert_eq!(nibbles.slice_to(4), Nibbles { data: vec![0x01, 0x02, 0x03, 0x04] });
-        assert_eq!(nibbles.slice_from(4), Nibbles { data: vec![0x05, 0x06, 0x07, 0x08] });
+        assert_eq!(nibbles.slice_to(4), nibbles![0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(nibbles.slice_from(4), nibbles![0x05, 0x06, 0x07, 0x08]);
         assert_eq!(nibbles.at(3), 0x04);
     }
 
@@ -140,6 +194,16 @@ mod tests {
     fn test_len() {
         let nibbles = Nibbles::from_bytes(&[0x12, 0x34, 0x56, 0x78]);
         assert_eq!(nibbles.len(), 8);
+    }
+
+    #[test]
+    fn test_serde() -> Result<(), serde_json::Error> {
+        let nibbles = nibbles![0x01, 0x02, 0x03];
+        let serialized = serde_json::to_string(&nibbles)?;
+        assert_eq!(serialized, "[1,18,48]");
+        let deserialized: Nibbles = serde_json::from_str(&serialized)?;
+        assert_eq!(deserialized, nibbles);
+        Ok(())
     }
 
     fn prefixed_bytes_test(data: &[u8], exp: &[u8], leaf: bool) {
