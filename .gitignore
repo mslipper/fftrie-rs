@@ -6,4 +6,6 @@
 # already existing elements were commented out
 
 #/target
-/Cargo.lock
+/crates/fftrie/Cargo.lock
+
+flamegraph.svg

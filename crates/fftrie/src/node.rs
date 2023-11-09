@@ -36,9 +36,9 @@ pub enum Node {
 impl Display for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Node::Branch(branch) => write!(f, "Branch"),
-            Node::Leaf(leaf) => write!(f, "Leaf"),
-            Node::Extension(extension) => write!(f, "Extension"),
+            Node::Branch(_) => write!(f, "Branch"),
+            Node::Leaf(_) => write!(f, "Leaf"),
+            Node::Extension(_) => write!(f, "Extension"),
         }
     }
 }

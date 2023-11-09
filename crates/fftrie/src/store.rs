@@ -94,7 +94,7 @@ impl Store for FileStore {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut bw = &mut BufWriter::new(&self.file);
+        let bw = &mut BufWriter::new(&self.file);
         bw.write_all(&self.buf)?;
         bw.flush()?;
         self.disk_size += self.buf.len() as i64;

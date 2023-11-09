@@ -1,7 +1,6 @@
 extern crate core;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use rlp::RlpStream;
@@ -30,8 +29,7 @@ pub struct CommitResult {
 pub struct Trie {
     root_offset: Option<i64>,
     store: Rc<RefCell<dyn Store>>,
-    nodes: HashMap<i64, Node>,
-    last_id: i64,
+    nodes: Vec<Node>,
 }
 
 impl Trie {
@@ -39,8 +37,7 @@ impl Trie {
         Self {
             root_offset,
             store,
-            nodes: HashMap::new(),
-            last_id: -100,
+            nodes: Vec::with_capacity(65535),
         }
     }
 
@@ -75,7 +72,7 @@ impl Trie {
 
                     if shared_prefix.len() == leaf.path.len() && shared_prefix.len() == path.len() {
                         leaf.value = value.to_vec();
-                        self.nodes.insert(current_node_id, Node::Leaf(leaf));
+                        self.insert_node(current_node_id, Node::Leaf(leaf));
                         break;
                     }
 
@@ -103,9 +100,9 @@ impl Trie {
                         let branch_id = self.intern(Node::Branch(branch));
                         let ext_path = leaf.path.slice_to(shared_prefix.len());
 
-                        self.nodes.insert(current_node_id, Node::Extension(Extension::new(ext_path, branch_id)));
+                        self.insert_node(current_node_id, Node::Extension(Extension::new(ext_path, branch_id)));
                     } else {
-                        self.nodes.insert(current_node_id, Node::Branch(branch));
+                        self.insert_node(current_node_id, Node::Branch(branch));
                     }
 
                     break;
@@ -120,7 +117,7 @@ impl Trie {
                         path = path.slice_from(shared_prefix.len());
                         let new_child = child.clone();
                         ext.child = self.intern(new_child);
-                        self.nodes.insert(current_node_id, Node::Extension(ext.clone()));
+                        self.insert_node(current_node_id, Node::Extension(ext.clone()));
                         current_node_id = ext.child;
                         continue;
                     }
@@ -149,10 +146,10 @@ impl Trie {
                     }
 
                     if matched_path.len() == 0 {
-                        self.nodes.insert(current_node_id, Node::Branch(branch));
+                        self.insert_node(current_node_id, Node::Branch(branch));
                     } else {
                         let branch_id = self.intern(Node::Branch(branch));
-                        self.nodes.insert(current_node_id, Node::Extension(Extension::new(matched_path, branch_id)));
+                        self.insert_node(current_node_id, Node::Extension(Extension::new(matched_path, branch_id)));
                     }
 
                     break;
@@ -160,7 +157,7 @@ impl Trie {
                 Node::Branch(mut branch) => {
                     if path.len() == 0 {
                         branch.value = Some(value.to_vec());
-                        self.nodes.insert(current_node_id, Node::Branch(branch));
+                        self.insert_node(current_node_id, Node::Branch(branch));
                         break;
                     }
 
@@ -170,7 +167,7 @@ impl Trie {
                     // This branch has no child at the branch nibble, so we create a leaf node.
                     if branch.children[branch_nibble] == 0 {
                         branch.children[branch_nibble] = self.intern(Node::Leaf(Leaf::new(path, value.to_vec())));
-                        self.nodes.insert(current_node_id, Node::Branch(branch));
+                        self.insert_node(current_node_id, Node::Branch(branch));
                         break;
                     }
 
@@ -187,7 +184,7 @@ impl Trie {
                     let child = self.get_node(child_offset)?;
                     let new_child = child.clone();
                     branch.children[branch_nibble] = self.intern(new_child);
-                    self.nodes.insert(current_node_id, Node::Branch(branch.clone()));
+                    self.insert_node(current_node_id, Node::Branch(branch.clone()));
                     current_node_id = branch.children[branch_nibble];
                 }
             }
@@ -266,9 +263,8 @@ impl Trie {
     }
 
     fn intern(&mut self, node: Node) -> i64 {
-        let id = self.last_id;
-        self.nodes.insert(id, node);
-        self.last_id -= 1;
+        let id = -100 - self.nodes.len() as i64;
+        self.nodes.push(node);
         id
     }
 
@@ -276,20 +272,15 @@ impl Trie {
         self.get_node_with_local_map(offset, &self.nodes)
     }
 
-    fn get_node_with_local_map(&self, offset: i64, nodes: &HashMap<i64, Node>) -> Result<Node, Box<dyn std::error::Error>> {
+    fn get_node_with_local_map(&self, offset: i64, nodes: &Vec<Node>) -> Result<Node, Box<dyn std::error::Error>> {
         if offset < 0 {
-            return nodes.get(&offset)
+            return nodes.get(map_offset(offset))
                 .cloned()
                 .ok_or("node not found here".into());
         }
 
-        match nodes.get(&offset) {
-            Some(node) => Ok((*node).clone()),
-            None => {
-                let node = self.store.borrow_mut().get(offset)?;
-                Ok(node)
-            }
-        }
+        let node = self.store.borrow_mut().get(offset)?;
+        Ok(node)
     }
 
     fn calculate_root(&mut self) -> Result<[u8; 32], Box<dyn std::error::Error>> {
@@ -314,7 +305,7 @@ impl Trie {
         Ok(root_hash)
     }
 
-    fn hash_node(&self, offset: i64, nodes: &mut HashMap<i64, Node>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    fn hash_node(&self, offset: i64, nodes: &mut Vec<Node>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut node = self.get_node_with_local_map(offset, nodes)?;
 
         if !node.is_dirty() {
@@ -383,7 +374,7 @@ impl Trie {
 
         node.set_hash(out.clone());
         node.set_dirty(false);
-        nodes.insert(offset, node.clone());
+        nodes[map_offset(offset)] = node.clone();
         Ok(out)
     }
 
@@ -421,6 +412,10 @@ impl Trie {
         node.set_committed(true);
         let offset = self.store.borrow_mut().put(node.clone())?;
         Ok(offset)
+    }
+
+    fn insert_node(&mut self, offset: i64, node: Node) {
+        self.nodes[map_offset(offset)] = node;
     }
 }
 
@@ -485,9 +480,9 @@ mod tests {
 
     #[cfg(feature = "bench")]
     mod bench {
-        use super::*;
+        use crate::store::{CachingStore, FileStore};
 
-        use crate::store::{FileStore, CachingStore};
+        use super::*;
 
         #[test]
         fn bench_10000_sets() -> Result<(), Box<dyn std::error::Error>> {
@@ -499,7 +494,8 @@ mod tests {
             let binding = hex::decode("f8448080a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")?;
             let empty_acc = binding.as_slice();
 
-            let mut seed = hmac_sha256::Hash::hash(b"all your base are belong to us");;
+            let mut seed = hmac_sha256::Hash::hash(b"all your base are belong to us");
+            ;
             let mut last_result: CommitResult;
             for _ in 0..25 {
                 let mut inputs = get_kvs(&seed);
@@ -539,4 +535,12 @@ fn rlp_hash(hash: Vec<u8>) -> Vec<u8> {
     }
 
     [[0x80 + 32u8].as_slice(), hash.as_slice()].concat()
+}
+
+fn map_offset(offset: i64) -> usize {
+    if offset > -100 {
+        panic!("offset must be negative");
+    }
+
+    ((offset + 100) * -1) as usize
 }
